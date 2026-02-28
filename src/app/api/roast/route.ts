@@ -20,32 +20,42 @@ export async function POST(req: Request) {
 
     if (!process.env.OPENROUTER_API_KEY) {
       return NextResponse.json({ 
-        roast: "请在 Vercel 设置中配置 OPENROUTER_API_KEY 以开启真实 AI 评审！" 
+        roast: "Missing OPENROUTER_API_KEY. Configure it in Vercel settings." 
       });
     }
 
-    // 切换至更强大的 Gemma 3 12B 免费模型
     const response = await openai.chat.completions.create({
       model: "google/gemma-3-12b-it:free", 
       messages: [
         {
           role: "system",
-          content: `你是一位顶级、毒舌、但极具专业能力的着陆页评审专家 (CRO Expert)。
-          你说话风格幽默且尖锐，喜欢指出那些平庸、无聊、转化率低下的设计和文案。
-          你需要使用中文进行回复。`
+          content: `You are a world-class Conversion Rate Optimization (CRO) expert with a brutal, witty, and sarcastic personality. 
+          Your goal is to roast landing pages to death but provide high-value, professional advice hidden in the sarcasm.
+          
+          Guidelines:
+          1. Speak in CHINESE (中文).
+          2. Use emojis to add character (🔥, 💀, 💩, 🚀).
+          3. Critique: Hero section, CTA, Copywriting, and Trust signals.
+          4. Be funny but helpful.`
         },
         {
           role: "user",
-          content: `请评审这个着陆页 URL: ${url}。
-          任务：
-          1. 根据典型的创业公司错误（如 H1 文案平淡、CTA 不明显、缺乏社交证明、视觉逻辑混乱等）进行一段毒舌点评（2-3句话）。
-          2. 给出现在必须立即修改的 3 个具体建议。
+          content: `Roast this landing page URL: ${url}. 
           
-          输出格式：
-          - 毒舌点评部分
-          - 【立即修复】列表`
+          Format your output like this:
+          ### 💀 毒舌评价
+          [A hilarious and painful 2-3 sentence roast]
+          
+          ### 🛠️ 拯救方案
+          - **文案修改**: [Concrete suggestion]
+          - **设计优化**: [Concrete suggestion]
+          - **转化提升**: [Concrete suggestion]
+          
+          ### 📈 预计提升
+          [A sarcastic but optimistic prediction of conversion rate increase]`
         }
       ],
+      temperature: 0.8,
     });
 
     const text = response.choices[0]?.message?.content || "AI 似乎被你的网页烂到了，说不出话来。";
@@ -54,7 +64,7 @@ export async function POST(req: Request) {
   } catch (error: any) {
     console.error("OpenRouter Roast error:", error);
     return NextResponse.json({ 
-      error: error.message || "评审失败，AI 正在休息。" 
+      error: error.message || "Failed to roast the page" 
     }, { status: 500 });
   }
 }
