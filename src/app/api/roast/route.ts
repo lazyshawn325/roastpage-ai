@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
-import puppeteer from "puppeteer";
+import * as cheerio from "cheerio";
 
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
@@ -11,45 +11,33 @@ const openai = new OpenAI({
   }
 });
 
-async function captureAndExtract(url: string) {
-  let browser;
+// 100% 兼容 Vercel 的轻量级网页分析逻辑
+async function analyzePage(url: string) {
   try {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: [
-        '--no-sandbox', 
-        '--disable-setuid-sandbox',
-        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      ],
-    });
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 });
-    
-    // 增加对 GitHub 等防爬站点的处理
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    
-    const metadata = await page.evaluate(() => {
-      return {
-        title: document.title || "无标题",
-        h1: document.querySelector('h1')?.innerText || "未找到 H1",
-        description: document.querySelector('meta[name="description"]')?.getAttribute('content') || "未配置描述",
-        scriptsCount: document.querySelectorAll('script').length,
-        imagesWithoutAlt: Array.from(document.querySelectorAll('img')).filter(img => !img.alt).length
-      };
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      },
+      next: { revalidate: 3600 } // 缓存 1 小时
     });
 
-    const screenshot = await page.screenshot({ 
-      type: 'jpeg', 
-      quality: 40,
-      encoding: 'base64' 
-    });
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
     
-    return { screenshot, metadata };
+    const html = await response.text();
+    const $ = cheerio.load(html);
+
+    return {
+      title: $("title").text() || "无标题",
+      h1: $("h1").first().text() || "未找到 H1 标签",
+      description: $('meta[name="description"]').attr("content") || "未配置描述",
+      keywords: $('meta[name="keywords"]').attr("content") || "无关键词",
+      imagesCount: $("img").length,
+      imagesWithoutAlt: $("img:not([alt])").length,
+      scriptsCount: $("script").length,
+    };
   } catch (error) {
-    console.error("Analysis failed, proceeding with text-only mode:", error);
+    console.error("Fetch analysis failed:", error);
     return null;
-  } finally {
-    if (browser) await browser.close();
   }
 }
 
@@ -58,63 +46,42 @@ export async function POST(req: Request) {
     const { url } = await req.json();
     if (!url) return NextResponse.json({ error: "URL is required" }, { status: 400 });
 
-    const analysis = await captureAndExtract(url);
+    // 执行轻量级审计
+    const metadata = await analyzePage(url);
 
     const systemPrompt = `你是一位顶级、毒舌、但极具专业能力的着陆页评审专家 (CRO Expert)。
-    你拥有‘X光视力’，能同时看到网页的视觉设计和底层代码。
+    你拥有‘代码透视眼’，能通过底层数据一眼看穿一个网页的平庸。
     必须使用中文，输出格式必须严谨包含 ### 💀 毒舌评价、### 🛠️ 拯救方案、### 📈 预计提升。`;
 
-    // 核心修复点：使用可选链避免崩溃
-    const metadataContext = analysis ? `
-    [底层代码审计数据]:
-    - 页面标题: ${analysis.metadata?.title}
-    - H1 标签内容: ${analysis.metadata?.h1}
-    - Meta 描述: ${analysis.metadata?.description}
-    - 脚本加载数量: ${analysis.metadata?.scriptsCount}
-    - 缺少 Alt 标签的图片: ${analysis.metadata?.imagesWithoutAlt}
-    ` : `[警告]: 无法直接抓取该站点（可能有反爬虫）。请根据你对该知名站点 ${url} 的通用印象进行吐槽。`;
+    const context = metadata ? `
+    [底层代码审计结果]:
+    - 标题: ${metadata.title}
+    - 核心 H1: ${metadata.h1}
+    - SEO 描述: ${metadata.description}
+    - 页面图片总数: ${metadata.imagesCount}
+    - 垃圾图片(无Alt): ${metadata.imagesWithoutAlt}
+    - 脚本负担: ${metadata.scriptsCount}
+    ` : `[警告]: 无法直接抓取该站点（可能有严格屏蔽）。请根据你对该网址 ${url} 的通用印象进行专业吐槽。`;
 
     const userPrompt = `请评审这个网址: ${url}。
-    ${metadataContext}
-    请进行深度轰炸。`;
+    ${context}
+    任务：请从 CRO (转化率) 和 SEO (搜索引擎优化) 两个维度进行无情轰炸。`;
 
-    try {
-      const messages: any[] = [
+    // 调用 OpenRouter 
+    const response = await openai.chat.completions.create({
+      model: "google/gemma-3-12b-it:free", 
+      messages: [
         { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: userPrompt },
-            ...(analysis?.screenshot ? [{
-              type: "image_url",
-              image_url: { url: `data:image/jpeg;base64,${analysis.screenshot}` }
-            }] : [])
-          ]
-        }
-      ];
+        { role: "user", content: userPrompt }
+      ],
+      temperature: 0.8,
+    });
 
-      const response = await openai.chat.completions.create({
-        model: "google/gemma-3-12b-it:free", 
-        messages: messages,
-        temperature: 0.8,
-      });
+    const roastText = response.choices[0]?.message?.content || "AI 被你的网页代码气到自闭了。";
 
-      return NextResponse.json({ roast: response.choices[0]?.message?.content });
-    } catch (aiError: any) {
-      console.error("AI Error:", aiError.message);
-      // 最后的兜底逻辑：纯文本请求
-      const fallbackResponse = await openai.chat.completions.create({
-        model: "google/gemma-3-12b-it:free", 
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt }
-        ],
-        temperature: 0.8,
-      });
-      return NextResponse.json({ roast: fallbackResponse.choices[0]?.message?.content });
-    }
+    return NextResponse.json({ roast: roastText });
   } catch (error: any) {
-    console.error("Outer Error:", error);
-    return NextResponse.json({ error: "服务器内部错误，AI 被气晕了。" }, { status: 500 });
+    console.error("Final Error:", error);
+    return NextResponse.json({ error: "由于该网站防火墙太厚或 API 拥堵，评审暂时中断。" }, { status: 500 });
   }
 }
