@@ -16,33 +16,37 @@ async function captureAndExtract(url: string) {
   try {
     browser = await puppeteer.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox',
+        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      ],
     });
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 25000 });
     
-    // 1. 提取关键元数据 (这就是用户截图做不到的)
+    // 增加对 GitHub 等防爬站点的处理
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    
     const metadata = await page.evaluate(() => {
       return {
-        title: document.title,
-        h1: document.querySelector('h1')?.innerText || "未找到 H1 标签",
-        description: document.querySelector('meta[name="description"]')?.getAttribute('content') || "未配置 Meta Description",
+        title: document.title || "无标题",
+        h1: document.querySelector('h1')?.innerText || "未找到 H1",
+        description: document.querySelector('meta[name="description"]')?.getAttribute('content') || "未配置描述",
         scriptsCount: document.querySelectorAll('script').length,
         imagesWithoutAlt: Array.from(document.querySelectorAll('img')).filter(img => !img.alt).length
       };
     });
 
-    // 2. 截图 (低质量、小尺寸以保证 Payload 兼容)
     const screenshot = await page.screenshot({ 
       type: 'jpeg', 
-      quality: 50,
+      quality: 40,
       encoding: 'base64' 
     });
     
     return { screenshot, metadata };
   } catch (error) {
-    console.error("Analysis failed:", error);
+    console.error("Analysis failed, proceeding with text-only mode:", error);
     return null;
   } finally {
     if (browser) await browser.close();
@@ -58,24 +62,21 @@ export async function POST(req: Request) {
 
     const systemPrompt = `你是一位顶级、毒舌、但极具专业能力的着陆页评审专家 (CRO Expert)。
     你拥有‘X光视力’，能同时看到网页的视觉设计和底层代码。
-    
-    评审准则：
-    1. 结合视觉截图和提取的代码元数据。
-    2. 毫不留情地指出文案烂、设计丑、代码乱的地方。
-    3. 必须使用中文，输出格式必须严谨包含 ### 💀 毒舌评价、### 🛠️ 拯救方案、### 📈 预计提升。`;
+    必须使用中文，输出格式必须严谨包含 ### 💀 毒舌评价、### 🛠️ 拯救方案、### 📈 预计提升。`;
 
-    const metadataContext = analysis?.metadata ? `
+    // 核心修复点：使用可选链避免崩溃
+    const metadataContext = analysis ? `
     [底层代码审计数据]:
-    - 页面标题: ${analysis.metadata.title}
-    - H1 标签内容: ${analysis.metadata.h1}
-    - Meta 描述: ${analysis.metadata.description}
-    - 脚本加载数量: ${analysis.metadata.scriptsCount} (越多越慢)
-    - 缺少 Alt 标签的图片: ${analysis.metadata.imagesWithoutAlt}
-    ` : "未能提取到代码数据";
+    - 页面标题: ${analysis.metadata?.title}
+    - H1 标签内容: ${analysis.metadata?.h1}
+    - Meta 描述: ${analysis.metadata?.description}
+    - 脚本加载数量: ${analysis.metadata?.scriptsCount}
+    - 缺少 Alt 标签的图片: ${analysis.metadata?.imagesWithoutAlt}
+    ` : `[警告]: 无法直接抓取该站点（可能有反爬虫）。请根据你对该知名站点 ${url} 的通用印象进行吐槽。`;
 
     const userPrompt = `请评审这个网址: ${url}。
     ${metadataContext}
-    请根据这些‘X光’数据和视觉截图进行深度轰炸。`;
+    请进行深度轰炸。`;
 
     try {
       const messages: any[] = [
@@ -100,7 +101,8 @@ export async function POST(req: Request) {
 
       return NextResponse.json({ roast: response.choices[0]?.message?.content });
     } catch (aiError: any) {
-      // Fallback logic
+      console.error("AI Error:", aiError.message);
+      // 最后的兜底逻辑：纯文本请求
       const fallbackResponse = await openai.chat.completions.create({
         model: "google/gemma-3-12b-it:free", 
         messages: [
@@ -112,6 +114,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ roast: fallbackResponse.choices[0]?.message?.content });
     }
   } catch (error: any) {
-    return NextResponse.json({ error: "X光分析失败，请检查网址是否可访问。" }, { status: 500 });
+    console.error("Outer Error:", error);
+    return NextResponse.json({ error: "服务器内部错误，AI 被气晕了。" }, { status: 500 });
   }
 }
